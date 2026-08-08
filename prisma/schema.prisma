@@ -1,0 +1,687 @@
+// ============================================================================
+// ERP Foundation Schema
+// Covers: Branches, Users, Roles & Permissions (RBAC), Refresh Tokens, Audit Log
+// Future modules (Products, Inventory, Sales, Purchasing, Accounting, ZATCA
+// e-invoicing, ...) will be added as separate Prisma models in later phases,
+// referencing User / Branch the same way these do.
+// ============================================================================
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ----------------------------------------------------------------------------
+// Branches — supports "تقييد الوصول حسب الفرع" (multi-branch access control)
+// ----------------------------------------------------------------------------
+model Branch {
+  id        String   @id @default(uuid())
+  name      String
+  code      String   @unique
+  address   String?
+  phone     String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users      User[]
+  warehouses Warehouse[]
+  sales      Sale[]
+  purchaseOrders PurchaseOrder[]
+  quotations Quotation[]
+
+  @@map("branches")
+}
+
+// ----------------------------------------------------------------------------
+// Permissions — fine-grained, grouped by module (users, products, inventory, ...)
+// key convention: "<module>.<action>" e.g. "products.manage", "invoices.approve"
+// ----------------------------------------------------------------------------
+model Permission {
+  id          String   @id @default(uuid())
+  key         String   @unique
+  module      String
+  description String?
+  createdAt   DateTime @default(now())
+
+  roles RolePermission[]
+
+  @@index([module])
+  @@map("permissions")
+}
+
+// ----------------------------------------------------------------------------
+// Roles — "صلاحيات حسب الوظيفة". isSystem roles (Admin, ...) cannot be deleted.
+// ----------------------------------------------------------------------------
+model Role {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  description String?
+  isSystem    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  users       User[]
+  permissions RolePermission[]
+
+  @@map("roles")
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+// ----------------------------------------------------------------------------
+// Users — one account per employee, optionally scoped to a branch.
+// branchId = null means access is not branch-restricted (e.g. head-office admin).
+// ----------------------------------------------------------------------------
+model User {
+  id                String    @id @default(uuid())
+  fullName          String
+  email             String    @unique
+  username          String    @unique
+  passwordHash      String
+  isActive          Boolean   @default(true)
+
+  roleId            String
+  role              Role      @relation(fields: [roleId], references: [id])
+
+  branchId          String?
+  branch            Branch?   @relation(fields: [branchId], references: [id])
+
+  // Two-factor authentication (TOTP)
+  twoFactorEnabled  Boolean   @default(false)
+  twoFactorSecret   String?
+
+  lastLoginAt       DateTime?
+  createdById       String?
+  createdBy         User?     @relation("UserCreatedBy", fields: [createdById], references: [id])
+  createdUsers      User[]    @relation("UserCreatedBy")
+
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  refreshTokens     RefreshToken[]
+  auditLogs         AuditLog[]
+
+  @@index([roleId])
+  @@index([branchId])
+  @@map("users")
+}
+
+// ----------------------------------------------------------------------------
+// Refresh tokens — hashed, revocable, one row per active session/device.
+// ----------------------------------------------------------------------------
+model RefreshToken {
+  id         String    @id @default(uuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  tokenHash  String    @unique
+  userAgent  String?
+  ipAddress  String?
+
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+// ----------------------------------------------------------------------------
+// Audit log — "سجل العمليات": who did what, when, from where.
+// ----------------------------------------------------------------------------
+model AuditLog {
+  id         String   @id @default(uuid())
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id])
+
+  action     String   // e.g. CREATE, UPDATE, DELETE, LOGIN, LOGIN_FAILED, LOGOUT
+  resource   String   // e.g. User, Role, Branch, Permission
+  resourceId String?
+
+  method     String?  // HTTP method
+  path       String?  // request path
+
+  ipAddress  String?
+  userAgent  String?
+  metadata   Json?
+
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+  @@index([resource, resourceId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// ============================================================================
+// PHASE 2: Products & Inventory
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// Categories — supports subcategories via self-relation (parentId)
+// ----------------------------------------------------------------------------
+model Category {
+  id        String     @id @default(uuid())
+  name      String
+  code      String     @unique
+  isActive  Boolean    @default(true)
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  parentId  String?
+  parent    Category?  @relation("CategoryTree", fields: [parentId], references: [id])
+  children  Category[] @relation("CategoryTree")
+
+  products  Product[]
+
+  @@map("categories")
+}
+
+// ----------------------------------------------------------------------------
+// Suppliers — minimal contact/profile info for now. Statement of account,
+// payments and purchase-order history will be added in the Purchasing phase.
+// ----------------------------------------------------------------------------
+model Supplier {
+  id        String    @id @default(uuid())
+  name      String
+  phone     String?
+  email     String?
+  address   String?
+  balance   Decimal   @default(0) @db.Decimal(12, 2) // positive = we owe the supplier money
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  products      Product[]
+  transactions  SupplierTransaction[]
+  purchaseOrders PurchaseOrder[]
+
+  @@map("suppliers")
+}
+
+// ----------------------------------------------------------------------------
+// SupplierTransaction — append-only statement-of-account ledger (mirrors
+// CustomerTransaction). amount is signed: positive increases what we owe.
+// ----------------------------------------------------------------------------
+model SupplierTransaction {
+  id            String   @id @default(uuid())
+  supplierId    String
+  supplier      Supplier @relation(fields: [supplierId], references: [id])
+
+  type          String   // OPENING_BALANCE, PURCHASE, PAYMENT, DEBIT_NOTE, ADJUSTMENT
+  amount        Decimal  @db.Decimal(12, 2)
+  balanceAfter  Decimal  @db.Decimal(12, 2)
+
+  referenceType String?
+  referenceId   String?
+  notes         String?
+
+  createdById   String?
+  createdAt     DateTime @default(now())
+
+  @@index([supplierId])
+  @@index([createdAt])
+  @@map("supplier_transactions")
+}
+
+// ----------------------------------------------------------------------------
+// Warehouses — physical stock locations, each tied to one branch.
+// A branch can have more than one warehouse (e.g. showroom + backstore).
+// ----------------------------------------------------------------------------
+model Warehouse {
+  id        String   @id @default(uuid())
+  name      String
+  code      String   @unique
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  branchId  String
+  branch    Branch   @relation(fields: [branchId], references: [id])
+
+  stocks    Stock[]
+  movements StockMovement[]
+  sales     Sale[]
+  purchaseOrders PurchaseOrder[]
+
+  @@index([branchId])
+  @@map("warehouses")
+}
+
+// ----------------------------------------------------------------------------
+// Products
+// ----------------------------------------------------------------------------
+model Product {
+  id               String    @id @default(uuid())
+  sku              String    @unique // رقم الصنف
+  barcode          String?   @unique
+  name             String
+  description      String?
+
+  categoryId       String
+  category         Category  @relation(fields: [categoryId], references: [id])
+
+  supplierId       String?
+  supplier         Supplier? @relation(fields: [supplierId], references: [id])
+
+  manufacturer     String?
+  imageUrl         String?
+  unit             String    @default("قطعة") // وحدة القياس
+
+  // أسعار متعددة: تجزئة – جملة – مقاولين – مشاريع
+  priceRetail      Decimal   @db.Decimal(12, 2)
+  priceWholesale   Decimal   @db.Decimal(12, 2)
+  priceContractor  Decimal   @db.Decimal(12, 2)
+  priceProject     Decimal   @db.Decimal(12, 2)
+  costPrice        Decimal?  @db.Decimal(12, 2)
+
+  minStockLevel    Int       @default(0)
+  vatRate          Decimal   @default(15.00) @db.Decimal(5, 2)
+  isVatApplicable  Boolean   @default(true)
+  isActive         Boolean   @default(true)
+
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  stocks    Stock[]
+  movements StockMovement[]
+  saleItems SaleItem[]
+  saleReturnItems SaleReturnItem[]
+  purchaseOrderItems PurchaseOrderItem[]
+  quotationItems QuotationItem[]
+
+  @@index([categoryId])
+  @@index([supplierId])
+  @@map("products")
+}
+
+// ----------------------------------------------------------------------------
+// Stock — current balance per (product, warehouse). Denormalized for fast
+// reads; kept in sync by StockMovement writes (see InventoryService).
+// ----------------------------------------------------------------------------
+model Stock {
+  id          String   @id @default(uuid())
+  productId   String
+  product     Product  @relation(fields: [productId], references: [id])
+  warehouseId String
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id])
+
+  quantity    Int      @default(0)
+  updatedAt   DateTime @updatedAt
+
+  @@unique([productId, warehouseId])
+  @@index([warehouseId])
+  @@map("stocks")
+}
+
+// ----------------------------------------------------------------------------
+// StockMovement — append-only ledger of every stock change.
+// quantity is signed: positive = stock increase, negative = stock decrease.
+// ----------------------------------------------------------------------------
+model StockMovement {
+  id            String    @id @default(uuid())
+  productId     String
+  product       Product   @relation(fields: [productId], references: [id])
+  warehouseId   String
+  warehouse     Warehouse @relation(fields: [warehouseId], references: [id])
+
+  type          String    // INITIAL, PURCHASE_IN, SALE_OUT, ADJUSTMENT_IN, ADJUSTMENT_OUT, TRANSFER_IN, TRANSFER_OUT, COUNT_ADJUSTMENT
+  quantity      Int
+  balanceAfter  Int
+
+  referenceType String?
+  referenceId   String?
+  notes         String?
+
+  createdById   String?
+  createdAt     DateTime  @default(now())
+
+  @@index([productId])
+  @@index([warehouseId])
+  @@index([createdAt])
+  @@map("stock_movements")
+}
+
+// ============================================================================
+// PHASE 3: Customers
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// Customers — customerType determines which Product price tier applies
+// (RETAIL -> priceRetail, WHOLESALE -> priceWholesale, CONTRACTOR -> priceContractor,
+// PROJECT -> priceProject) once the Sales module reads it.
+// ----------------------------------------------------------------------------
+model Customer {
+  id           String    @id @default(uuid())
+  name         String
+  phone        String?
+  email        String?
+  address      String?
+
+  customerType String    @default("RETAIL") // RETAIL, WHOLESALE, CONTRACTOR, PROJECT
+  vatNumber    String?   // buyer's 15-digit VAT number, required for B2B (Standard) invoices
+
+  creditLimit  Decimal   @default(0) @db.Decimal(12, 2)
+  balance      Decimal   @default(0) @db.Decimal(12, 2) // positive = customer owes money
+
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  transactions CustomerTransaction[]
+  sales        Sale[]
+  quotations   Quotation[]
+
+  @@map("customers")
+}
+
+// ----------------------------------------------------------------------------
+// CustomerTransaction — append-only statement-of-account ledger.
+// amount is signed: positive increases balance (customer owes more),
+// negative decreases it (e.g. payment received).
+// ----------------------------------------------------------------------------
+model CustomerTransaction {
+  id            String   @id @default(uuid())
+  customerId    String
+  customer      Customer @relation(fields: [customerId], references: [id])
+
+  type          String   // OPENING_BALANCE, INVOICE, PAYMENT, CREDIT_NOTE, ADJUSTMENT
+  amount        Decimal  @db.Decimal(12, 2)
+  balanceAfter  Decimal  @db.Decimal(12, 2)
+
+  referenceType String?
+  referenceId   String?
+  notes         String?
+
+  createdById   String?
+  createdAt     DateTime @default(now())
+
+  @@index([customerId])
+  @@index([createdAt])
+  @@map("customer_transactions")
+}
+
+// ============================================================================
+// PHASE 4: Sales
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// Sale — a confirmed sales invoice. Immutable once created; corrections go
+// through SaleReturn (credit note), matching standard accounting practice.
+// invoiceSeq is a DB-native autoincrement, so human-readable invoice numbers
+// (e.g. "INV-000123") can be derived safely without race conditions.
+// ----------------------------------------------------------------------------
+model Sale {
+  id         String @id @default(uuid())
+  invoiceSeq Int    @default(autoincrement())
+  zatcaUuid  String @default(uuid()) @unique // stable per-invoice UUID for e-invoicing (ZATCA)
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id])
+
+  branchId String
+  branch   Branch @relation(fields: [branchId], references: [id])
+
+  warehouseId String
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id])
+
+  subtotal       Decimal @db.Decimal(12, 2)
+  discountAmount Decimal @default(0) @db.Decimal(12, 2)
+  vatAmount      Decimal @db.Decimal(12, 2)
+  totalAmount    Decimal @db.Decimal(12, 2)
+
+  paymentMethod String // CASH, CARD, BANK_TRANSFER, CREDIT
+  status        String @default("CONFIRMED") // CONFIRMED, CANCELLED
+  notes         String?
+
+  // Snapshotted at creation time from CompanySettings, so historical invoices
+  // stay accurate even if the company's registered info changes later.
+  sellerName      String?
+  sellerVatNumber String?
+
+  createdById String?
+  createdAt   DateTime @default(now())
+
+  items   SaleItem[]
+  returns SaleReturn[]
+  quotation Quotation?
+
+  @@index([customerId])
+  @@index([branchId])
+  @@index([createdAt])
+  @@map("sales")
+}
+
+model SaleItem {
+  id     String @id @default(uuid())
+  saleId String
+  sale   Sale   @relation(fields: [saleId], references: [id], onDelete: Cascade)
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+
+  quantity       Int
+  unitPrice      Decimal @db.Decimal(12, 2) // snapshot of the price tier used, at sale time
+  discountAmount Decimal @default(0) @db.Decimal(12, 2)
+  vatAmount      Decimal @db.Decimal(12, 2)
+  lineTotal      Decimal @db.Decimal(12, 2) // (quantity * unitPrice - discount) + vat
+
+  @@index([saleId])
+  @@index([productId])
+  @@map("sale_items")
+}
+
+// ----------------------------------------------------------------------------
+// SaleReturn — مرتجع بيع. Restocks inventory and credits the customer.
+// ----------------------------------------------------------------------------
+model SaleReturn {
+  id     String @id @default(uuid())
+  saleId String
+  sale   Sale   @relation(fields: [saleId], references: [id])
+
+  reason      String?
+  totalAmount Decimal @db.Decimal(12, 2)
+
+  createdById String?
+  createdAt   DateTime @default(now())
+
+  items SaleReturnItem[]
+
+  @@index([saleId])
+  @@map("sale_returns")
+}
+
+model SaleReturnItem {
+  id       String     @id @default(uuid())
+  returnId String
+  return   SaleReturn @relation(fields: [returnId], references: [id], onDelete: Cascade)
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+
+  quantity  Int
+  unitPrice Decimal @db.Decimal(12, 2)
+  lineTotal Decimal @db.Decimal(12, 2)
+
+  @@index([returnId])
+  @@map("sale_return_items")
+}
+
+// ============================================================================
+// PHASE 5: Purchasing
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// PurchaseOrder — DRAFT -> CONFIRMED (اعتماد) -> PARTIALLY_RECEIVED/RECEIVED
+// (استلام, possibly across multiple deliveries) -> or CANCELLED.
+// Stock and supplier balance are only affected at receiving time, not at
+// creation/confirmation, matching real procurement practice.
+// ----------------------------------------------------------------------------
+model PurchaseOrder {
+  id       String @id @default(uuid())
+  orderSeq Int    @default(autoincrement())
+
+  supplierId String
+  supplier   Supplier @relation(fields: [supplierId], references: [id])
+
+  branchId String
+  branch   Branch @relation(fields: [branchId], references: [id])
+
+  warehouseId String
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id])
+
+  subtotal       Decimal @db.Decimal(12, 2)
+  discountAmount Decimal @default(0) @db.Decimal(12, 2)
+  vatAmount      Decimal @db.Decimal(12, 2)
+  totalAmount    Decimal @db.Decimal(12, 2)
+
+  status String @default("DRAFT") // DRAFT, CONFIRMED, PARTIALLY_RECEIVED, RECEIVED, CANCELLED
+  notes  String?
+
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  items PurchaseOrderItem[]
+
+  @@index([supplierId])
+  @@index([branchId])
+  @@index([createdAt])
+  @@map("purchase_orders")
+}
+
+model PurchaseOrderItem {
+  id              String        @id @default(uuid())
+  purchaseOrderId String
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+
+  orderedQuantity  Int
+  receivedQuantity Int @default(0)
+
+  unitCost  Decimal @db.Decimal(12, 2)
+  vatAmount Decimal @db.Decimal(12, 2)
+  lineTotal Decimal @db.Decimal(12, 2) // (orderedQuantity * unitCost) + vat
+
+  @@index([purchaseOrderId])
+  @@index([productId])
+  @@map("purchase_order_items")
+}
+
+// ============================================================================
+// PHASE 6: Quotations
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// Quotation — عرض سعر. Revising a quotation creates a NEW row linked via
+// previousVersionId (own quoteSeq, so full history is kept and browsable)
+// rather than mutating history in place. Converting creates a real Sale,
+// preserving any manually negotiated unitPrice from the quotation items.
+// ----------------------------------------------------------------------------
+model Quotation {
+  id       String @id @default(uuid())
+  quoteSeq Int    @default(autoincrement())
+  version  Int    @default(1)
+
+  previousVersionId String?    @unique
+  previousVersion   Quotation? @relation("QuotationRevision", fields: [previousVersionId], references: [id])
+  nextVersion       Quotation? @relation("QuotationRevision")
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id])
+
+  branchId String
+  branch   Branch @relation(fields: [branchId], references: [id])
+
+  validUntil DateTime
+  status     String @default("DRAFT") // DRAFT, SENT, ACCEPTED, REJECTED, EXPIRED, REVISED, CONVERTED
+
+  subtotal       Decimal @db.Decimal(12, 2)
+  discountAmount Decimal @default(0) @db.Decimal(12, 2)
+  vatAmount      Decimal @db.Decimal(12, 2)
+  totalAmount    Decimal @db.Decimal(12, 2)
+
+  notes       String?
+  sentAt      DateTime?
+  respondedAt DateTime?
+
+  convertedSaleId String? @unique
+  convertedSale   Sale?   @relation(fields: [convertedSaleId], references: [id])
+
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  items QuotationItem[]
+
+  @@index([customerId])
+  @@index([branchId])
+  @@map("quotations")
+}
+
+model QuotationItem {
+  id          String    @id @default(uuid())
+  quotationId String
+  quotation   Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+
+  quantity       Int
+  unitPrice      Decimal @db.Decimal(12, 2) // customer's price tier, or manually negotiated
+  discountAmount Decimal @default(0) @db.Decimal(12, 2)
+  vatAmount      Decimal @db.Decimal(12, 2)
+  lineTotal      Decimal @db.Decimal(12, 2)
+
+  @@index([quotationId])
+  @@index([productId])
+  @@map("quotation_items")
+}
+
+// ============================================================================
+// PHASE 7: ZATCA E-Invoicing foundation
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// CompanySettings — singleton row (fixed id) holding the legal/tax identity
+// used to populate every invoice's QR code and XML. Snapshotted onto each
+// Sale at creation time (see Sale.sellerName/sellerVatNumber) so historical
+// invoices remain accurate even if this changes later.
+// ----------------------------------------------------------------------------
+model CompanySettings {
+  id               String   @id @default("singleton")
+  legalNameAr      String
+  legalNameEn      String?
+  vatNumber        String   // 15-digit VAT registration number
+  crNumber         String?  // commercial registration number
+
+  buildingNumber   String?
+  streetName       String?
+  district         String?
+  city             String?
+  postalCode       String?
+  additionalNumber String?
+  countryCode      String   @default("SA")
+
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@map("company_settings")
+}
