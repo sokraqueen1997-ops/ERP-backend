@@ -18,6 +18,8 @@ import { SalesModule } from './sales/sales.module';
 import { PurchasesModule } from './purchases/purchases.module';
 import { QuotationsModule } from './quotations/quotations.module';
 import { CompanySettingsModule } from './company-settings/company-settings.module';
+import { AccountingModule } from './accounting/accounting.module';
+import { DashboardModule } from './dashboard/dashboard.module';
 import { AuditLogInterceptor } from './common/interceptors/audit-log.interceptor';
 
 @Module({
@@ -40,6 +42,8 @@ import { AuditLogInterceptor } from './common/interceptors/audit-log.interceptor
     PurchasesModule,
     QuotationsModule,
     CompanySettingsModule,
+    AccountingModule,
+    DashboardModule,
   ],
   providers: [
     {

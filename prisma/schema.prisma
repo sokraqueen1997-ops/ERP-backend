@@ -210,6 +210,7 @@ model Supplier {
   products      Product[]
   transactions  SupplierTransaction[]
   purchaseOrders PurchaseOrder[]
+  accountTransactions AccountTransaction[]
 
   @@map("suppliers")
 }
@@ -258,6 +259,9 @@ model Warehouse {
   movements StockMovement[]
   sales     Sale[]
   purchaseOrders PurchaseOrder[]
+  transfersFrom StockTransfer[] @relation("TransferFrom")
+  transfersTo   StockTransfer[] @relation("TransferTo")
+  stockCounts   StockCount[]
 
   @@index([branchId])
   @@map("warehouses")
@@ -304,6 +308,8 @@ model Product {
   saleReturnItems SaleReturnItem[]
   purchaseOrderItems PurchaseOrderItem[]
   quotationItems QuotationItem[]
+  stockTransferItems StockTransferItem[]
+  stockCountLines StockCountLine[]
 
   @@index([categoryId])
   @@index([supplierId])
@@ -386,6 +392,7 @@ model Customer {
   transactions CustomerTransaction[]
   sales        Sale[]
   quotations   Quotation[]
+  accountTransactions AccountTransaction[]
 
   @@map("customers")
 }
@@ -684,4 +691,164 @@ model CompanySettings {
   updatedAt        DateTime @updatedAt
 
   @@map("company_settings")
+}
+
+// ============================================================================
+// PHASE 8: Accounting (cash/bank ledger + P&L / VAT reporting)
+// ============================================================================
+// This is a lightweight, practical accounting layer (cash & bank movement
+// tracking + reports derived from existing Sales/Purchases data) — NOT a
+// full double-entry general ledger with a chart of accounts. That would be
+// a much larger system; this covers what a small trading business needs
+// day to day, and can be extended later if formal bookkeeping is required.
+
+// ----------------------------------------------------------------------------
+// Account — الصندوق (CASH) أو حساب بنكي (BANK).
+// ----------------------------------------------------------------------------
+model Account {
+  id            String   @id @default(uuid())
+  name          String
+  type          String   // CASH, BANK
+  bankName      String?
+  accountNumber String?
+  iban          String?
+  balance       Decimal  @default(0) @db.Decimal(12, 2)
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  transactions AccountTransaction[]
+
+  @@map("accounts")
+}
+
+// ----------------------------------------------------------------------------
+// AccountTransaction — سند قبض (RECEIPT) أو سند صرف (PAYMENT). When linked to
+// a customer/supplier, AccountingService also posts the matching entry on
+// that party's own ledger (CustomerTransaction/SupplierTransaction) so both
+// stay in sync.
+// ----------------------------------------------------------------------------
+model AccountTransaction {
+  id         String  @id @default(uuid())
+  voucherSeq Int     @default(autoincrement())
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id])
+
+  type     String // RECEIPT, PAYMENT
+  category String // SALES_COLLECTION, SUPPLIER_PAYMENT, EXPENSE, OWNER_DEPOSIT, OWNER_WITHDRAWAL, OTHER_INCOME, OTHER
+
+  amount       Decimal @db.Decimal(12, 2) // always positive; direction implied by type
+  balanceAfter Decimal @db.Decimal(12, 2)
+
+  description String?
+
+  relatedCustomerId String?
+  relatedCustomer   Customer? @relation(fields: [relatedCustomerId], references: [id])
+
+  relatedSupplierId String?
+  relatedSupplier   Supplier? @relation(fields: [relatedSupplierId], references: [id])
+
+  referenceType String?
+  referenceId   String?
+
+  createdById String?
+  createdAt   DateTime @default(now())
+
+  @@index([accountId])
+  @@index([createdAt])
+  @@map("account_transactions")
+}
+
+// ============================================================================
+// PHASE 9: Stock Transfers & Stock Counts
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// StockTransfer — تحويل بضاعة بين مستودعين. PENDING -> IN_TRANSIT (shipped,
+// stock deducted from source) -> COMPLETED (received, stock added at
+// destination) -> or CANCELLED (only while still PENDING, before shipping).
+// ----------------------------------------------------------------------------
+model StockTransfer {
+  id         String @id @default(uuid())
+  transferSeq Int   @default(autoincrement())
+
+  fromWarehouseId String
+  fromWarehouse   Warehouse @relation("TransferFrom", fields: [fromWarehouseId], references: [id])
+
+  toWarehouseId String
+  toWarehouse   Warehouse @relation("TransferTo", fields: [toWarehouseId], references: [id])
+
+  status String @default("PENDING") // PENDING, IN_TRANSIT, COMPLETED, CANCELLED
+  notes  String?
+
+  createdById String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  shippedAt   DateTime?
+  receivedAt  DateTime?
+
+  items StockTransferItem[]
+
+  @@index([fromWarehouseId])
+  @@index([toWarehouseId])
+  @@map("stock_transfers")
+}
+
+model StockTransferItem {
+  id         String        @id @default(uuid())
+  transferId String
+  transfer   StockTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+
+  quantity Int
+
+  @@index([transferId])
+  @@index([productId])
+  @@map("stock_transfer_items")
+}
+
+// ----------------------------------------------------------------------------
+// StockCount — جرد دوري (PERIODIC) أو مفاجئ (SURPRISE) لمستودع واحد.
+// expectedQty is snapshotted from Stock at creation time; completing the
+// count applies any variance as a COUNT_ADJUSTMENT stock movement.
+// ----------------------------------------------------------------------------
+model StockCount {
+  id       String @id @default(uuid())
+  countSeq Int    @default(autoincrement())
+
+  warehouseId String
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id])
+
+  type   String @default("PERIODIC") // PERIODIC, SURPRISE
+  status String @default("OPEN") // OPEN, COMPLETED, CANCELLED
+  notes  String?
+
+  createdById String?
+  createdAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  lines StockCountLine[]
+
+  @@index([warehouseId])
+  @@map("stock_counts")
+}
+
+model StockCountLine {
+  id      String     @id @default(uuid())
+  countId String
+  count   StockCount @relation(fields: [countId], references: [id], onDelete: Cascade)
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+
+  expectedQty Int
+  countedQty  Int?
+  variance    Int?
+
+  @@index([countId])
+  @@index([productId])
+  @@map("stock_count_lines")
 }
