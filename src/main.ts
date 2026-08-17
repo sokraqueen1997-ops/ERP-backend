@@ -10,7 +10,15 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
   app.use(helmet());
-  app.enableCors();
+
+  // In production, set CORS_ORIGIN to your real frontend URL(s), comma-separated
+  // (e.g. "https://erp.yourcompany.com,https://www.yourcompany.com").
+  // Falls back to the local Vite dev server when not set.
+  const corsOrigins = process.env.CORS_ORIGIN
+    ? process.env.CORS_ORIGIN.split(',').map((origin) => origin.trim())
+    : ['http://localhost:5173'];
+  app.enableCors({ origin: corsOrigins });
+
   app.setGlobalPrefix('api/v1');
 
   app.useGlobalPipes(
