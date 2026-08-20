@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException, BadRequestException } from '@nestjs/common';
+import { Injectable, UnauthorizedException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
@@ -6,12 +6,15 @@ import { UsersService } from '../users/users.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditLogService } from '../audit-log/audit-log.service';
 import { TwoFactorService } from './two-factor/two-factor.service';
+import { SubscriptionService } from '../subscription/subscription.service';
 import { LoginDto } from './dto/login.dto';
 
 interface RequestContext {
   ip?: string;
   userAgent?: string;
 }
+
+const BLOCKED_STATUSES = ['SUSPENDED', 'EXPIRED', 'CANCELLED'];
 
 @Injectable()
 export class AuthService {
@@ -21,6 +24,7 @@ export class AuthService {
     private readonly jwtService: JwtService,
     private readonly auditLogService: AuditLogService,
     private readonly twoFactorService: TwoFactorService,
+    private readonly subscriptionService: SubscriptionService,
   ) {}
 
   async login(dto: LoginDto, ctx: RequestContext) {
@@ -66,6 +70,24 @@ export class AuthService {
         });
         throw new UnauthorizedException('Invalid two-factor code');
       }
+    }
+
+    // Optional platform subscription check — a no-op unless this deployment
+    // is explicitly configured as a managed tenant (see SubscriptionService).
+    // Fails open, so this can never lock anyone out due to a platform outage.
+    const subscriptionStatus = await this.subscriptionService.checkStatus();
+    if (subscriptionStatus && BLOCKED_STATUSES.includes(subscriptionStatus)) {
+      await this.auditLogService.log({
+        userId: user.id,
+        action: 'LOGIN_FAILED',
+        resource: 'auth',
+        ipAddress: ctx.ip,
+        userAgent: ctx.userAgent,
+        metadata: { reason: 'subscription_inactive', status: subscriptionStatus },
+      });
+      throw new ForbiddenException(
+        'تم تعليق الوصول لهذا الحساب. الرجاء التواصل معنا لتجديد الاشتراك.',
+      );
     }
 
     await this.prisma.user.update({

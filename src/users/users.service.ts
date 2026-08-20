@@ -46,7 +46,10 @@ export class UsersService {
   findByUsernameOrEmail(usernameOrEmail: string) {
     return this.prisma.user.findFirst({
       where: {
-        OR: [{ username: usernameOrEmail }, { email: usernameOrEmail }],
+        OR: [
+          { username: { equals: usernameOrEmail, mode: 'insensitive' } },
+          { email: { equals: usernameOrEmail, mode: 'insensitive' } },
+        ],
       },
       include: { role: { include: { permissions: { include: { permission: true } } } } },
     });

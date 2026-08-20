@@ -4,6 +4,7 @@ import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { UsersModule } from '../users/users.module';
 import { AuditLogModule } from '../audit-log/audit-log.module';
+import { SubscriptionModule } from '../subscription/subscription.module';
 import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { JwtStrategy } from './strategies/jwt.strategy';
@@ -12,7 +13,7 @@ import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../common/guards/permissions.guard';
 
 @Module({
-  imports: [PassportModule, JwtModule.register({}), UsersModule, AuditLogModule],
+  imports: [PassportModule, JwtModule.register({}), UsersModule, AuditLogModule, SubscriptionModule],
   controllers: [AuthController],
   providers: [
     AuthService,
