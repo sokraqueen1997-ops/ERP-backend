@@ -277,8 +277,8 @@ model Product {
   name             String
   description      String?
 
-  categoryId       String
-  category         Category  @relation(fields: [categoryId], references: [id])
+  categoryId       String?
+  category         Category? @relation(fields: [categoryId], references: [id])
 
   supplierId       String?
   supplier         Supplier? @relation(fields: [supplierId], references: [id])

@@ -14,6 +14,27 @@ const PRICE_FIELD_BY_CUSTOMER_TYPE: Record<string, 'priceRetail' | 'priceWholesa
   PROJECT: 'priceProject',
 };
 
+/**
+ * Formats a Date as "YYYY-MM-DD HH:MM" in Saudi Arabia local time (UTC+3),
+ * for human-facing display on the printable invoice. Uses formatToParts
+ * (not a locale's default separators) so the output shape is exact and
+ * doesn't depend on ICU locale quirks.
+ */
+function formatSaudiDateTime(date: Date): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Riyadh',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(date);
+
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? '';
+  return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}`;
+}
+
 export interface SaleQuery {
   customerId?: string;
   branchId?: string;
@@ -372,6 +393,9 @@ export class SalesService {
   /**
    * Unsigned UBL 2.1-shaped invoice XML. See zatca-invoice-xml.util.ts for
    * exactly what is and isn't included (no digital signature yet).
+   * NOTE: this timestamp is intentionally left in UTC/ISO form — it's a
+   * regulatory document, not something a person reads directly, and ZATCA's
+   * expected format is what matters here (not local display time).
    */
   async generateInvoiceXml(saleId: string) {
     const sale = await this.findOne(saleId);
@@ -436,8 +460,9 @@ export class SalesService {
 
     const sellerAddressParts = [company?.streetName, company?.city].filter(Boolean);
 
-    const isoCreatedAt = sale.createdAt.toISOString();
-    const issueDate = `${isoCreatedAt.slice(0, 10)} ${isoCreatedAt.slice(11, 16)}`;
+    // Displayed to a human on the printed invoice — shown in Saudi local time (UTC+3),
+    // not the raw UTC timestamp stored in the database.
+    const issueDate = formatSaudiDateTime(sale.createdAt);
 
     return buildInvoiceHtml({
       invoiceNumber: sale.invoiceNumber,

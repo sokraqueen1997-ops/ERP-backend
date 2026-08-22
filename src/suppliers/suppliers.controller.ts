@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  Header,
   Param,
   Patch,
   Post,
@@ -57,11 +58,26 @@ export class SuppliersController {
     @Param('id') id: string,
     @Query('page') page?: string,
     @Query('pageSize') pageSize?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
   ) {
     return this.suppliersService.findStatement(id, {
       page: page ? Number(page) : undefined,
       pageSize: pageSize ? Number(pageSize) : undefined,
+      from,
+      to,
     });
+  }
+
+  @Get(':id/statement/print')
+  @RequirePermissions('suppliers.view')
+  @Header('Content-Type', 'text/html; charset=utf-8')
+  printStatement(
+    @Param('id') id: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.suppliersService.generateStatementHtml(id, { from, to });
   }
 
   @Post(':id/transactions')

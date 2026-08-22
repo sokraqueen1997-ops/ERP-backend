@@ -63,11 +63,13 @@ export class ProductsService {
       dto.barcode
         ? this.prisma.product.findUnique({ where: { barcode: dto.barcode } })
         : Promise.resolve(null),
-      this.prisma.category.findUnique({ where: { id: dto.categoryId } }),
+      dto.categoryId
+        ? this.prisma.category.findUnique({ where: { id: dto.categoryId } })
+        : Promise.resolve(null),
     ]);
     if (skuTaken) throw new ConflictException('SKU already exists');
     if (barcodeTaken) throw new ConflictException('Barcode already exists');
-    if (!category) throw new BadRequestException('Invalid categoryId');
+    if (dto.categoryId && !category) throw new BadRequestException('Invalid categoryId');
 
     if (dto.supplierId) {
       const supplier = await this.prisma.supplier.findUnique({ where: { id: dto.supplierId } });

@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  Header,
   Param,
   Patch,
   Post,
@@ -57,11 +58,26 @@ export class CustomersController {
     @Param('id') id: string,
     @Query('page') page?: string,
     @Query('pageSize') pageSize?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
   ) {
     return this.customersService.findStatement(id, {
       page: page ? Number(page) : undefined,
       pageSize: pageSize ? Number(pageSize) : undefined,
+      from,
+      to,
     });
+  }
+
+  @Get(':id/statement/print')
+  @RequirePermissions('customers.view')
+  @Header('Content-Type', 'text/html; charset=utf-8')
+  printStatement(
+    @Param('id') id: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.customersService.generateStatementHtml(id, { from, to });
   }
 
   @Post(':id/transactions')
